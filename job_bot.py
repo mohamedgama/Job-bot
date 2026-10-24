@@ -121,8 +121,12 @@ def jooble(kw):  # official free API: https://jooble.org/api/about
         r = requests.post(f"https://jooble.org/api/{key}", json=q, timeout=25)
         r.raise_for_status()
         jobs += r.json().get("jobs", [])
+    kept = 0
+    places = []
     for j in jobs:
         loc = (j.get("location") or "").lower()
+        if loc not in places and len(places) < 6:
+            places.append(loc)
         ttl = j.get("title", "").lower()
         snip = j.get("snippet", "").lower()
         in_cairo = any(x in loc for x in CAIRO)
@@ -137,32 +141,76 @@ def jooble(kw):  # official free API: https://jooble.org/api/about
             pass
         elif not is_remote or restricted:
             continue  # on-site abroad / other governorate / remote but limited to one country
+        kept += 1
         yield dict(title=re.sub(r"<[^>]+>", "", j.get("title", "")).strip(),
                    company=j.get("company", ""), url=j["link"],
                    source="Jooble" + (f" ({j['source']})" if j.get("source") else ""))
+    print(f"[info] jooble '{kw}': api gave {len(jobs)}, kept {kept}, places e.g. {places}")
+
+
+def _diag(name, pg, anchors):
+    """Print what the browser really sees, so the parser can be fixed from real data."""
+    print(f"[info] {name}: title='{(pg.title() or '')[:50]}' anchors={len(anchors)} url={up.unquote(pg.url)[:90]}")
+    for t, h in anchors[:15]:
+        print(f"[info]   {t[:40]!r} -> {up.unquote(h)[:100]}")
+
+
+def _anchors(pg):
+    pg.evaluate("window.scrollTo(0, document.body.scrollHeight)")  # trigger lazy loading
+    pg.wait_for_timeout(1500)
+    return pg.eval_on_selector_all("a", "e=>e.map(x=>[x.innerText.trim(), x.href])")
 
 
 def shaghalni_all(keywords):
     """Shaghalni renders results with JavaScript, so we use a headless browser."""
     from playwright.sync_api import sync_playwright
     skip = ["الأقسام", "إتصل", "الشروط", "سياسة", "facebook", "twitter", "instagram", "javascript"]
+    kws = [k for k in keywords if k in ("كول سنتر", "خدمة عملاء", "لايف شات", "دعم عملاء")]
     with sync_playwright() as p:
         b = p.chromium.launch()
-        pg = b.new_page()
-        for kw in keywords:
+        pg = b.new_context(user_agent=HEADERS["User-Agent"], locale="ar-EG").new_page()
+        for i, kw in enumerate(kws):
             q = up.quote(kw)
             pg.goto("https://www.shaghalni.com/%D9%88%D8%B8%D8%A7%D8%A6%D9%81"
                     f"?searchStr={q}&searchCity=1&category=&city=1&str={q}&page=1&get_filters=0",
                     wait_until="networkidle", timeout=45000)
-            for t, h in pg.eval_on_selector_all("a", "e=>e.map(x=>[x.innerText.trim(), x.href])"):
+            pg.wait_for_timeout(2000)
+            anchors = _anchors(pg)
+            if i == 0:
+                _diag("shaghalni", pg, anchors)
+            for t, h in anchors:
                 d = up.unquote(h)
                 if (h.startswith("https://www.shaghalni.com/") and len(t) > 8
                         and not any(x in d for x in skip)):
-                    yield dict(title=t.split("\n")[0], company="", url=h.split("?")[0], source="Shaghalni")
+                    parts = [x.strip() for x in t.split("\n") if x.strip()]
+                    yield dict(title=parts[0], company=parts[1] if len(parts) > 1 else "",
+                               url=h.split("?")[0], source="Shaghalni")
         b.close()
 
 
 shaghalni_all.all_kw = True
+
+
+def jobzella_all(keywords):
+    """Jobzella is a JavaScript app; first we only look at what it shows (see [info] lines)."""
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        b = p.chromium.launch()
+        pg = b.new_context(user_agent=HEADERS["User-Agent"], locale="en-US").new_page()
+        for url in ("https://www.jobzella.com/jobs?q=call%20center", "https://www.jobzella.com/"):
+            pg.goto(url, wait_until="networkidle", timeout=45000)
+            pg.wait_for_timeout(2000)
+            anchors = _anchors(pg)
+            _diag("jobzella", pg, anchors)
+            for t, h in anchors:
+                if "/job" in up.unquote(h).lower() and len(t) > 8 and "jobzella.com" in h:
+                    parts = [x.strip() for x in t.split("\n") if x.strip()]
+                    yield dict(title=parts[0], company=parts[1] if len(parts) > 1 else "",
+                               url=h.split("?")[0], source="Jobzella")
+        b.close()
+
+
+jobzella_all.all_kw = True
 
 
 BROWSER_KW = ["call center", "live chat", "customer service", "customer support",
@@ -259,7 +307,7 @@ def generic(name, url_tpl, link_re, base):
 # ⚠️ generic ones are best-effort: verify the URL pattern on each site
 SOURCES = [
     linkedin, jooble, forasna, wuzzuf_b, tanqeeb_b,
-    generic("Jobzella", "https://www.jobzella.com/jobs?q={q}", r"/jobs?/", "https://www.jobzella.com"),
+    jobzella_all,
     shaghalni_all,
 ]
 
@@ -292,7 +340,9 @@ def main():
     if not first_run:  # first run only builds the baseline, no spam
         for j in new:
             notify(j)
-    print(f"{len(new)} new ({'baseline' if first_run else 'sent'})")
+    from collections import Counter
+    per = Counter(j["source"].split(" ")[0] for j in new)
+    print(f"{len(new)} new ({'baseline' if first_run else 'sent'}) by source: {dict(per)}")
     SEEN_FILE.write_text(json.dumps(sorted(seen)[-5000:], ensure_ascii=False))
 
 
