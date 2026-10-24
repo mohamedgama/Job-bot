@@ -205,6 +205,7 @@ def shaghalni_all(keywords):
         b = p.chromium.launch()
         pg = b.new_context(user_agent=HEADERS["User-Agent"], locale="ar-EG").new_page()
         pg.on("response", on_resp)
+        job_base = None  # discovered below: None = not tried yet, False = not found
         for i, kw in enumerate(kws):
             got.clear()
             q = up.quote(kw)
@@ -214,14 +215,26 @@ def shaghalni_all(keywords):
             pg.wait_for_timeout(2500)
             items = [it for d in list(got) for it in (d.get("data") or []) if isinstance(it, dict)]
             print(f"[info] shaghalni '{kw}': {len(items)} jobs from API")
-            if i == 0 and items:
-                print(f"[info]   sample: {items[0].get('title')!r} | {items[0].get('address_string')!r} | slug={items[0].get('slug')!r}")
-                try:  # learn the real job-page link by clicking the first card
-                    pg.get_by_text(str(items[0].get("title"))).first.click(timeout=6000)
-                    pg.wait_for_timeout(2500)
-                    print("[info]   job page url:", up.unquote(pg.url)[:120])
-                except Exception as e:
-                    print("[info]   click failed:", str(e)[:80])
+            if job_base is None and items:
+                # Find the real job-page address: try the usual patterns, keep the one that
+                # opens a page showing this job's title
+                slug, t0 = str(items[0].get("slug")), str(items[0].get("title"))
+                print(f"[info]   sample: {t0!r} | {items[0].get('address_string')!r} | slug={slug!r}")
+                for pref in ("وظيفة", "وظائف", "job", "jobs", ""):
+                    u = "https://www.shaghalni.com/" + (up.quote(pref) + "/" if pref else "") + up.quote(slug)
+                    try:
+                        r = pg.goto(u, wait_until="networkidle", timeout=30000)
+                        pg.wait_for_timeout(1500)
+                        ok = bool(r and r.status < 400 and t0 in pg.inner_text("body")
+                                  and "searchStr" not in pg.url)
+                        print(f"[info]   try /{pref}/slug -> status {r.status if r else '?'} ok={ok}")
+                        if ok:
+                            job_base = pref
+                            break
+                    except Exception as e:
+                        print("[info]   try failed:", str(e)[:60])
+                if job_base is None:
+                    job_base = False  # not found, use the search-page link
             for it in items:
                 addr = str(it.get("address_string") or "")
                 if any(x in addr for x in OTHER_GOV):
@@ -229,10 +242,15 @@ def shaghalni_all(keywords):
                 title = str(it.get("title") or it.get("short_title") or "").strip()
                 if not title:
                     continue
+                if job_base is not False and job_base is not None and it.get("slug"):
+                    link = ("https://www.shaghalni.com/" + (up.quote(job_base) + "/" if job_base else "")
+                            + up.quote(str(it["slug"])))
+                    note = ""
+                else:
+                    link = f"{page_url}#job-{it.get('id')}"
+                    note = "🔎 اللينك بيفتح نتايج البحث في شغلني (دور على اسم الوظيفة)"
                 yield dict(title=title, company=str(it.get("employer_name") or ""),
-                           url=f"{page_url}#job-{it.get('id')}",
-                           note="🔎 اللينك بيفتح نتايج البحث في شغلني (دور على اسم الوظيفة)",
-                           source="Shaghalni")
+                           url=link, note=note, source="Shaghalni")
         b.close()
 
 
