@@ -68,12 +68,16 @@ def bayt(kw):
         yield dict(title=txt(h), company="", url=up.urljoin("https://www.bayt.com", h["href"]), source="Bayt")
 
 
-def jooble(kw):
-    slug = re.sub(r"\s+", "-", kw.strip().lower())
-    s = get(f"https://eg.jooble.org/jobs-{up.quote(slug)}")
-    for a in s.find_all("a", href=re.compile(r"/desc/|/away/")):
-        if len(txt(a)) > 8:
-            yield dict(title=txt(a), company="", url=up.urljoin("https://eg.jooble.org", a["href"]), source="Jooble")
+def jooble(kw):  # official free API: https://jooble.org/api/about
+    key = os.environ.get("JOOBLE_API_KEY")
+    if not key:
+        return
+    r = requests.post(f"https://jooble.org/api/{key}",
+                      json={"keywords": kw, "location": "Egypt"}, timeout=25)
+    r.raise_for_status()
+    for j in r.json().get("jobs", []):
+        yield dict(title=re.sub(r"<[^>]+>", "", j.get("title", "")).strip(),
+                   company=j.get("company", ""), url=j["link"], source="Jooble")
 
 
 def shaghalni_all(keywords):
@@ -110,11 +114,10 @@ def generic(name, url_tpl, link_re, base):
 
 
 # ⚠️ generic ones are best-effort: verify the URL pattern on each site
+# Blocked (403) from GitHub servers, so disabled: wuzzuf, bayt, forasna, tanqeeb
 SOURCES = [
-    wuzzuf, linkedin, bayt, jooble,
-    generic("Forasna", "https://forasna.com/jobs/search?q={q}", r"/job/|/jobs/\d", "https://forasna.com"),
+    linkedin, jooble,
     generic("Jobzella", "https://www.jobzella.com/jobs?q={q}", r"/jobs?/", "https://www.jobzella.com"),
-    generic("Tanqeeb", "https://egypt.tanqeeb.com/jobs/search?keywords={q}", r"/jobs?/", "https://egypt.tanqeeb.com"),
     shaghalni_all,
 ]
 
