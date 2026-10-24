@@ -19,6 +19,12 @@ CAIRO = ["cairo", "القاهرة", "new cairo", "nasr city", "maadi", "heliopol
          "giza", "الجيزة", "mohandessin", "mohandiseen", "المهندسين", "dokki", "الدقي",
          "haram", "الهرم", "agouza", "العجوزة", "faisal", "فيصل", "imbaba", "6th of october",
          "6 october", "sixth of october", "sheikh zayed", "zayed", "smart village"]
+OTHER_GOV = ["alexandria", "الإسكندرية", "الاسكندرية", "mansoura", "المنصورة", "tanta", "طنطا",
+             "assiut", "أسيوط", "اسيوط", "sohag", "سوهاج", "luxor", "الأقصر", "aswan", "أسوان",
+             "hurghada", "الغردقة", "sharm", "شرم", "ismailia", "الإسماعيلية", "suez", "السويس",
+             "port said", "بورسعيد", "zagazig", "الزقازيق", "damietta", "دمياط", "minya", "المنيا",
+             "fayoum", "الفيوم", "beni suef", "بني سويف", "kafr el", "كفر الشيخ", "damanhour",
+             "دمنهور", "10th of ramadan", "العاشر من رمضان", "borg el arab", "برج العرب"]
 REMOTE = ["remote", "work from home", "work-from-home", "wfh", "home based", "home-based",
           "anywhere", "worldwide", "عن بعد", "ريموت", "من المنزل", "من البيت"]
 # Text that means "fully remote" (used on the description only)
@@ -130,6 +136,10 @@ def jooble(kw):  # official free API: https://jooble.org/api/about
         ttl = j.get("title", "").lower()
         snip = j.get("snippet", "").lower()
         in_cairo = any(x in loc for x in CAIRO)
+        if not in_cairo and loc.strip() in ("egypt", "مصر", "egypt, egypt"):
+            # Jooble gives only the country. Keep it unless the ad names another governorate.
+            text = " ".join([ttl, snip])
+            in_cairo = not any(x in text for x in OTHER_GOV)
         loc_is_remote = any(x in loc for x in REMOTE)
         # Remote: the LOCATION or the TITLE must say so. A description that only mentions
         # remote work is not enough, and a real on-site place (e.g. "Oregon State") never counts.
@@ -148,11 +158,19 @@ def jooble(kw):  # official free API: https://jooble.org/api/about
     print(f"[info] jooble '{kw}': api gave {len(jobs)}, kept {kept}, places e.g. {places}")
 
 
-def _diag(name, pg, anchors):
+def _diag(name, pg, anchors, hide=()):
     """Print what the browser really sees, so the parser can be fixed from real data."""
     print(f"[info] {name}: title='{(pg.title() or '')[:50]}' anchors={len(anchors)} url={up.unquote(pg.url)[:90]}")
-    for t, h in anchors[:15]:
-        print(f"[info]   {t[:40]!r} -> {up.unquote(h)[:100]}")
+    shown, seen_h = 0, set()
+    for t, h in anchors:
+        d = up.unquote(h)
+        if any(x in d for x in hide) or d in seen_h:
+            continue
+        seen_h.add(d)
+        print(f"[info]   {t[:40]!r} -> {d[:110]}")
+        shown += 1
+        if shown >= 25:
+            break
 
 
 def _anchors(pg):
@@ -177,11 +195,13 @@ def shaghalni_all(keywords):
             pg.wait_for_timeout(2000)
             anchors = _anchors(pg)
             if i == 0:
-                _diag("shaghalni", pg, anchors)
+                _diag("shaghalni", pg, anchors, hide=[
+                    "searchStr", "الأقسام", "facebook", "twitter", "instagram", "إتصل", "الشروط",
+                    "سياسة", "المحافظات", "إنشاء-حساب", "تسجيل-دخول", "راغب-عمل", "/شركة"])
             for t, h in anchors:
                 d = up.unquote(h)
                 if (h.startswith("https://www.shaghalni.com/") and len(t) > 8
-                        and not any(x in d for x in skip)):
+                        and "searchStr" not in d and not any(x in d for x in skip)):
                     parts = [x.strip() for x in t.split("\n") if x.strip()]
                     yield dict(title=parts[0], company=parts[1] if len(parts) > 1 else "",
                                url=h.split("?")[0], source="Shaghalni")
@@ -197,11 +217,13 @@ def jobzella_all(keywords):
     with sync_playwright() as p:
         b = p.chromium.launch()
         pg = b.new_context(user_agent=HEADERS["User-Agent"], locale="en-US").new_page()
-        for url in ("https://www.jobzella.com/jobs?q=call%20center", "https://www.jobzella.com/"):
+        for url in ("https://www.jobzella.com/search/jobs", "https://www.jobzella.com/search/jobs?q=call%20center"):
             pg.goto(url, wait_until="networkidle", timeout=45000)
             pg.wait_for_timeout(2000)
             anchors = _anchors(pg)
-            _diag("jobzella", pg, anchors)
+            _diag("jobzella", pg, anchors, hide=["facebook", "instagram", "twitter", "youtube", "linkedin",
+                                                 "/auth/", "about-us", "contact-us", "/search/companies",
+                                                 "/search/people", "blog.", "jobfair.", "job-posting"])
             for t, h in anchors:
                 if "/job" in up.unquote(h).lower() and len(t) > 8 and "jobzella.com" in h:
                     parts = [x.strip() for x in t.split("\n") if x.strip()]
@@ -277,7 +299,9 @@ FORASNA_PAGES = [
 
 def forasna(_keywords):
     for url, trusted in FORASNA_PAGES:
-        for a in get(url).select("a[href*='/job/p/']"):
+        found = get(url).select("a[href*='/job/p/']")
+        print(f"[info] forasna {up.unquote(url)[-40:]}: {len(found)} job links")
+        for a in found:
             title = txt(a)
             if len(title) < 3:
                 continue
