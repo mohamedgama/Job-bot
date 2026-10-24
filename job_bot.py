@@ -1,5 +1,5 @@
 """Job alert bot -> Telegram. Runs on GitHub Actions every ~5 min."""
-import json, os, re, urllib.parse as up
+import json, os, re, time, urllib.parse as up
 from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
@@ -19,7 +19,12 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 
 
 def get(url, **kw):
-    r = requests.get(url, headers=HEADERS, timeout=25, **kw)
+    time.sleep(1.5)  # be polite, avoid rate limits
+    try:
+        from curl_cffi import requests as cr  # looks like a real Chrome browser
+        r = cr.get(url, headers=HEADERS, impersonate="chrome", timeout=25)
+    except ImportError:
+        r = requests.get(url, headers=HEADERS, timeout=25)
     r.raise_for_status()
     return BeautifulSoup(r.text, "html.parser")
 
@@ -29,14 +34,23 @@ def txt(el):
 
 
 def wuzzuf(kw):
-    s = get("https://wuzzuf.net/search/jobs/?a=hpb&q=" + up.quote(kw))
-    for h in s.select("h2 a[href*='/jobs/p/']"):
-        card = h.find_parent("div", class_=True)
-        comp = card.select_one("a[href*='/jobs/careers/']") if card else None
-        yield dict(title=txt(h), company=txt(comp), url=h["href"].split("?")[0], source="Wuzzuf")
+    # Public landing pages (/a/...) are meant for crawlers; use them for English keywords
+    if kw.isascii():
+        slug = "-".join(w.capitalize() for w in kw.split())
+        u = f"https://wuzzuf.net/a/{slug}-Jobs-in-Egypt"
+    else:
+        u = "https://wuzzuf.net/search/jobs/?a=hpb&q=" + up.quote(kw)
+    for h in get(u).select("a[href*='/jobs/p/']"):
+        if len(txt(h)) > 5:
+            card = h.find_parent("div", class_=True)
+            comp = card.select_one("a[href*='/jobs/careers/']") if card else None
+            yield dict(title=txt(h), company=txt(comp), url=h["href"].split("?")[0], source="Wuzzuf")
 
 
 def linkedin(kw):  # public guest endpoint, no login; r3600 = last hour
+    if kw not in ("call center", "live chat", "customer service"):
+        return  # fewer requests -> avoids 429
+    time.sleep(3)
     u = ("https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?"
          + up.urlencode({"keywords": kw, "location": "Egypt", "f_TPR": "r3600", "start": 0}))
     for li in get(u).select("li"):
