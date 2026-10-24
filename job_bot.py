@@ -102,7 +102,8 @@ def jooble(kw):  # official free API: https://jooble.org/api/about
         if not (in_cairo or is_remote):
             continue  # other governorates / abroad on-site jobs
         yield dict(title=re.sub(r"<[^>]+>", "", j.get("title", "")).strip(),
-                   company=j.get("company", ""), url=j["link"], source="Jooble")
+                   company=j.get("company", ""), url=j["link"],
+                   source="Jooble" + (f" ({j['source']})" if j.get("source") else ""))
 
 
 def shaghalni_all(keywords):
@@ -128,6 +129,87 @@ def shaghalni_all(keywords):
 shaghalni_all.all_kw = True
 
 
+BROWSER_KW = ["call center", "live chat", "customer service", "customer support",
+              "كول سنتر", "خدمة عملاء"]
+
+
+def browser_site(name, make_url, link_re=None):
+    """Open the public page in a real headless Chrome (for sites that reject plain requests).
+    If the site shows a block / challenge page we stop and report it, nothing more."""
+    def run(keywords):
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            b = p.chromium.launch()
+            ctx = b.new_context(user_agent=HEADERS["User-Agent"], locale="en-US",
+                                viewport={"width": 1366, "height": 900})
+            pg = ctx.new_page()
+            for kw in keywords:
+                if kw not in BROWSER_KW:
+                    continue
+                url = make_url(kw)
+                resp = pg.goto(url, wait_until="domcontentloaded", timeout=45000)
+                pg.wait_for_timeout(3000)
+                title = (pg.title() or "").lower()
+                status = resp.status if resp else "?"
+                if (resp and resp.status >= 400) or any(
+                        x in title for x in ("just a moment", "access denied", "attention required", "forbidden")):
+                    print(f"[warn] {name}: blocked (status {status}, title '{title[:40]}')")
+                    break
+                host = up.urlparse(url).netloc
+                for t, h in pg.eval_on_selector_all("a", "e=>e.map(x=>[x.innerText.trim(), x.href])"):
+                    if len(t) > 8 and up.urlparse(h).netloc == host and (link_re is None or re.search(link_re, h)):
+                        parts = [x.strip() for x in t.split("\n") if x.strip()]
+                        yield dict(title=parts[0], company=parts[1] if len(parts) > 1 else "",
+                                   url=h.split("?")[0], source=name)
+            b.close()
+    run.__name__ = name
+    run.all_kw = True
+    return run
+
+
+def _wuzzuf_url(kw):
+    if kw.isascii():
+        return "https://wuzzuf.net/a/" + "-".join(w.capitalize() for w in kw.split()) + "-Jobs-in-Egypt"
+    return "https://wuzzuf.net/search/jobs/?a=hpb&q=" + up.quote(kw)
+
+
+wuzzuf_b = browser_site("Wuzzuf", _wuzzuf_url, r"/jobs/p/")
+tanqeeb_b = browser_site("Tanqeeb", lambda kw: "https://egypt.tanqeeb.com/jobs/search?keywords=" + up.quote(kw))
+
+
+def _fa(slug):
+    return "https://forasna.com/a/" + up.quote(slug)
+
+
+# Public category pages on Forasna (found on the site itself): (url, trusted)
+# trusted = the page is already call-center / support only, so skip the title filter
+FORASNA_PAGES = [
+    (_fa("وظائف-كول-سنتر-Call-Center-في-مصر"), True),
+    (_fa("وظائف-خدمة-عملاء-في-مصر"), True),
+    (_fa("وظائف-دعم-فنى-في-مصر"), True),
+    (_fa("وظائف-عمل-من-المنزل"), False),  # remote: any place, but title must match
+]
+
+
+def forasna(_keywords):
+    for url, trusted in FORASNA_PAGES:
+        for a in get(url).select("a[href*='/job/p/']"):
+            title = txt(a)
+            if len(title) < 3:
+                continue
+            info = a.get("title", "")  # e.g. "وظيفة X فى شركة Y فى  الجيزة, مصر"
+            loc = info.rsplit(" فى ", 1)[-1].strip()
+            if trusted and not any(x in loc for x in ("القاهرة", "الجيزة")):
+                continue  # on-site jobs only in Cairo / Giza (remote page is not filtered)
+            m = re.search(r"فى شركة (.+?) فى ", info)
+            yield dict(title=title, company=m.group(1) if m else "",
+                       url=up.urljoin("https://forasna.com", a["href"]).split("?")[0],
+                       source="Forasna", trusted=trusted)
+
+
+forasna.all_kw = True
+
+
 def generic(name, url_tpl, link_re, base):
     """Fallback for simple sites: any link whose href matches link_re."""
     def run(kw):
@@ -139,9 +221,8 @@ def generic(name, url_tpl, link_re, base):
 
 
 # ⚠️ generic ones are best-effort: verify the URL pattern on each site
-# Blocked (403) from GitHub servers, so disabled: wuzzuf, bayt, forasna, tanqeeb
 SOURCES = [
-    linkedin, jooble,
+    linkedin, jooble, forasna, wuzzuf_b, tanqeeb_b,
     generic("Jobzella", "https://www.jobzella.com/jobs?q={q}", r"/jobs?/", "https://www.jobzella.com"),
     shaghalni_all,
 ]
@@ -167,7 +248,7 @@ def main():
                     low = j["title"].lower()
                     if j["url"] in seen or any(x in low for x in EXCLUDE):
                         continue
-                    if not any(x in low for x in RELEVANT):
+                    if not j.get("trusted") and not any(x in low for x in RELEVANT):
                         continue  # title unrelated to call center / chat / support
                     seen.add(j["url"]); new.append(j)
             except Exception as e:
