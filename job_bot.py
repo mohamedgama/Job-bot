@@ -205,7 +205,7 @@ def shaghalni_all(keywords):
         b = p.chromium.launch()
         pg = b.new_context(user_agent=HEADERS["User-Agent"], locale="ar-EG").new_page()
         pg.on("response", on_resp)
-        job_base = None  # discovered below: None = not tried yet, False = not found
+        job_base = "وظائف"  # confirmed by testing: job pages are shaghalni.com/وظائف/<slug>
         for i, kw in enumerate(kws):
             got.clear()
             q = up.quote(kw)
