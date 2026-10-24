@@ -152,12 +152,16 @@ def jooble(kw):  # official free API: https://jooble.org/api/about
         is_remote = loc_is_remote or remote_by_title or remote_by_text
         restricted = any(x in " ".join([loc, ttl, snip]) for x in RESTRICTED)
         global_ok = any(x in " ".join([loc, ttl, snip]) for x in GLOBAL)
+        note = ""
         if in_cairo:
             pass
-        elif not (is_remote and global_ok) or restricted:
-            continue  # on-site abroad / other governorate / remote but limited to one country
+        elif restricted or not is_remote:
+            continue  # on-site abroad / other governorate / remote limited to one country
+        elif not global_ok:
+            # Remote, but the ad does not say people from Egypt can apply: send it with a warning
+            note = "⚠️ ريموت، بس مش مكتوب إنه مفتوح لمصر. اتأكد من الشروط قبل ما تقدم"
         kept += 1
-        yield dict(title=re.sub(r"<[^>]+>", "", j.get("title", "")).strip(),
+        yield dict(note=note, title=re.sub(r"<[^>]+>", "", j.get("title", "")).strip(),
                    company=j.get("company", ""), url=j["link"],
                    source="Jooble" + (f" ({j['source']})" if j.get("source") else ""))
     print(f"[info] jooble '{kw}': api gave {len(jobs)}, kept {kept}, places e.g. {places}")
@@ -185,48 +189,50 @@ def _anchors(pg):
 
 
 def shaghalni_all(keywords):
-    """Shaghalni renders results with JavaScript, so we use a headless browser."""
+    """Shaghalni loads jobs from its own JSON API; we open the page in a browser and read that answer."""
     from playwright.sync_api import sync_playwright
-    skip = ["الأقسام", "إتصل", "الشروط", "سياسة", "facebook", "twitter", "instagram", "javascript"]
     kws = [k for k in keywords if k in ("كول سنتر", "خدمة عملاء", "لايف شات", "دعم عملاء")]
+    got = []
+
+    def on_resp(r):
+        if "/api/job/jobs?" in r.url and "json" in r.headers.get("content-type", ""):
+            try:
+                got.append(r.json())
+            except Exception:
+                pass
+
     with sync_playwright() as p:
         b = p.chromium.launch()
         pg = b.new_context(user_agent=HEADERS["User-Agent"], locale="ar-EG").new_page()
-        calls = []
-        pg.on("response", lambda r: calls.append(r) if ("json" in r.headers.get("content-type", "")
-                                                        and len(calls) < 15) else None)
+        pg.on("response", on_resp)
         for i, kw in enumerate(kws):
+            got.clear()
             q = up.quote(kw)
-            pg.goto("https://www.shaghalni.com/%D9%88%D8%B8%D8%A7%D8%A6%D9%81"
-                    f"?searchStr={q}&searchCity=1&category=&city=1&str={q}&page=1&get_filters=0",
-                    wait_until="networkidle", timeout=45000)
-            pg.wait_for_timeout(2000)
-            anchors = _anchors(pg)
-            if i == 0:
-                for r in calls:
-                    try:
-                        d = r.json()
-                        if isinstance(d, dict):
-                            desc = "dict keys=" + str(list(d)[:8])
-                            for v in d.values():
-                                if isinstance(v, list) and v and isinstance(v[0], dict):
-                                    desc += f" | list[{len(v)}] item keys={list(v[0])[:10]}"
-                                    break
-                        else:
-                            desc = f"{type(d).__name__} len={len(d)}"
-                        print(f"[info] shaghalni api {up.unquote(r.url)[:110]} -> {desc}")
-                    except Exception:
-                        pass
-                _diag("shaghalni", pg, anchors, hide=[
-                    "searchStr", "الأقسام", "facebook", "twitter", "instagram", "إتصل", "الشروط",
-                    "سياسة", "المحافظات", "إنشاء-حساب", "تسجيل-دخول", "راغب-عمل", "/شركة"])
-            for t, h in anchors:
-                d = up.unquote(h)
-                if (h.startswith("https://www.shaghalni.com/") and len(t) > 8
-                        and "searchStr" not in d and not any(x in d for x in skip)):
-                    parts = [x.strip() for x in t.split("\n") if x.strip()]
-                    yield dict(title=parts[0], company=parts[1] if len(parts) > 1 else "",
-                               url=h.split("?")[0], source="Shaghalni")
+            page_url = ("https://www.shaghalni.com/%D9%88%D8%B8%D8%A7%D8%A6%D9%81"
+                        f"?searchStr={q}&searchCity=1&category=&city=1&str={q}&page=1&get_filters=0")
+            pg.goto(page_url, wait_until="networkidle", timeout=45000)
+            pg.wait_for_timeout(2500)
+            items = [it for d in list(got) for it in (d.get("data") or []) if isinstance(it, dict)]
+            print(f"[info] shaghalni '{kw}': {len(items)} jobs from API")
+            if i == 0 and items:
+                print(f"[info]   sample: {items[0].get('title')!r} | {items[0].get('address_string')!r} | slug={items[0].get('slug')!r}")
+                try:  # learn the real job-page link by clicking the first card
+                    pg.get_by_text(str(items[0].get("title"))).first.click(timeout=6000)
+                    pg.wait_for_timeout(2500)
+                    print("[info]   job page url:", up.unquote(pg.url)[:120])
+                except Exception as e:
+                    print("[info]   click failed:", str(e)[:80])
+            for it in items:
+                addr = str(it.get("address_string") or "")
+                if any(x in addr for x in OTHER_GOV):
+                    continue  # another governorate
+                title = str(it.get("title") or it.get("short_title") or "").strip()
+                if not title:
+                    continue
+                yield dict(title=title, company=str(it.get("employer_name") or ""),
+                           url=f"{page_url}#job-{it.get('id')}",
+                           note="🔎 اللينك بيفتح نتايج البحث في شغلني (دور على اسم الوظيفة)",
+                           source="Shaghalni")
         b.close()
 
 
@@ -309,34 +315,33 @@ def _fa(slug):
     return "https://forasna.com/a/" + up.quote(slug)
 
 
-# Public category pages on Forasna (found on the site itself): (url, trusted)
+# Public category pages on Forasna: (url, trusted)
 # trusted = the page is already call-center / support only, so skip the title filter
 FORASNA_PAGES = [
+    (_fa("وظائف-كول-سنتر-في-القاهرة"), True),
     (_fa("وظائف-كول-سنتر-Call-Center-في-مصر"), True),
     (_fa("وظائف-خدمة-عملاء-في-مصر"), True),
     (_fa("وظائف-دعم-فنى-في-مصر"), True),
-    (_fa("وظائف-عمل-من-المنزل"), False),  # remote: any place, but title must match
+    (_fa("وظائف-عمل-من-المنزل"), False),  # remote: any place, but the title must match
 ]
 
 
 def forasna(_keywords):
     for url, trusted in FORASNA_PAGES:
         found = get(url).select("a[href*='/job/p/']")
-        print(f"[info] forasna {up.unquote(url)[-40:]}: {len(found)} job links")
-        for a in found[:3]:
-            print(f"[info]   text={txt(a)[:30]!r} title_attr={a.get('title', '')[:60]!r}")
+        kept = 0
         for a in found:
             title = txt(a)
             if len(title) < 3:
-                continue
-            info = a.get("title", "")  # e.g. "وظيفة X فى شركة Y فى  الجيزة, مصر"
-            loc = info.rsplit(" فى ", 1)[-1].strip()
-            if trusted and not any(x in loc for x in ("القاهرة", "الجيزة")):
-                continue  # on-site jobs only in Cairo / Giza (remote page is not filtered)
-            m = re.search(r"فى شركة (.+?) فى ", info)
-            yield dict(title=title, company=m.group(1) if m else "",
+                continue  # image links
+            full = up.unquote(a["href"])  # the slug ends with the place, e.g. ...-الجيزة-444128
+            if trusted and not any(x in full for x in ("القاهرة", "الجيزة")):
+                continue  # on-site jobs only in Cairo / Giza (the remote page is not filtered)
+            kept += 1
+            yield dict(title=title, company="", note="" if trusted else "🏠 من صفحة العمل من المنزل",
                        url=up.urljoin("https://forasna.com", a["href"]).split("?")[0],
                        source="Forasna", trusted=trusted)
+        print(f"[info] forasna {up.unquote(url)[-38:]}: {len(found)} links, kept {kept}")
 
 
 forasna.all_kw = True
@@ -360,7 +365,10 @@ SOURCES = [
 
 
 def notify(j):
-    msg = f"🆕 {j['title']}\n🏢 {j['company'] or '-'}\n🌐 {j['source']}\n🔗 {j['url']}"
+    msg = f"🆕 {j['title']}\n🏢 {j['company'] or '-'}\n🌐 {j['source']}"
+    if j.get("note"):
+        msg += f"\n{j['note']}"
+    msg += f"\n🔗 {j['url']}"
     if not TOKEN:
         print(msg, "\n"); return
     requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
