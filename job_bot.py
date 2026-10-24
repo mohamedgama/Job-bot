@@ -30,6 +30,10 @@ REMOTE = ["remote", "work from home", "work-from-home", "wfh", "home based", "ho
 # Text that means "fully remote" (used on the description only)
 REMOTE_STRONG = ["fully remote", "100% remote", "remote position", "remote role", "remote job",
                  "work from home", "work-from-home", "work from anywhere", "عن بعد", "من المنزل"]
+# A remote job is kept only if the ad itself says people from Egypt / anywhere can apply
+GLOBAL = ["worldwide", "world wide", "anywhere in the world", "work from anywhere", "work anywhere",
+          "international candidates", "any country", "all countries", "emea", "mena", "middle east",
+          "north africa", "egypt", "cairo", "arabic", "مصر", "القاهرة", "من أي مكان", "العالم"]
 # Remote jobs limited to one country / region -> not useful from Egypt
 RESTRICTED = ["united states", "u.s.", " usa", "us only", "us-based", "must reside", "must be located",
               "must live", "time zone", "timezone", "pacific time", "eastern time", "central time",
@@ -147,9 +151,10 @@ def jooble(kw):  # official free API: https://jooble.org/api/about
         remote_by_text = (not loc or loc_is_remote) and any(x in snip for x in REMOTE_STRONG)
         is_remote = loc_is_remote or remote_by_title or remote_by_text
         restricted = any(x in " ".join([loc, ttl, snip]) for x in RESTRICTED)
+        global_ok = any(x in " ".join([loc, ttl, snip]) for x in GLOBAL)
         if in_cairo:
             pass
-        elif not is_remote or restricted:
+        elif not (is_remote and global_ok) or restricted:
             continue  # on-site abroad / other governorate / remote but limited to one country
         kept += 1
         yield dict(title=re.sub(r"<[^>]+>", "", j.get("title", "")).strip(),
@@ -187,6 +192,9 @@ def shaghalni_all(keywords):
     with sync_playwright() as p:
         b = p.chromium.launch()
         pg = b.new_context(user_agent=HEADERS["User-Agent"], locale="ar-EG").new_page()
+        calls = []
+        pg.on("response", lambda r: calls.append(r) if ("json" in r.headers.get("content-type", "")
+                                                        and len(calls) < 15) else None)
         for i, kw in enumerate(kws):
             q = up.quote(kw)
             pg.goto("https://www.shaghalni.com/%D9%88%D8%B8%D8%A7%D8%A6%D9%81"
@@ -195,6 +203,20 @@ def shaghalni_all(keywords):
             pg.wait_for_timeout(2000)
             anchors = _anchors(pg)
             if i == 0:
+                for r in calls:
+                    try:
+                        d = r.json()
+                        if isinstance(d, dict):
+                            desc = "dict keys=" + str(list(d)[:8])
+                            for v in d.values():
+                                if isinstance(v, list) and v and isinstance(v[0], dict):
+                                    desc += f" | list[{len(v)}] item keys={list(v[0])[:10]}"
+                                    break
+                        else:
+                            desc = f"{type(d).__name__} len={len(d)}"
+                        print(f"[info] shaghalni api {up.unquote(r.url)[:110]} -> {desc}")
+                    except Exception:
+                        pass
                 _diag("shaghalni", pg, anchors, hide=[
                     "searchStr", "الأقسام", "facebook", "twitter", "instagram", "إتصل", "الشروط",
                     "سياسة", "المحافظات", "إنشاء-حساب", "تسجيل-دخول", "راغب-عمل", "/شركة"])
@@ -301,6 +323,8 @@ def forasna(_keywords):
     for url, trusted in FORASNA_PAGES:
         found = get(url).select("a[href*='/job/p/']")
         print(f"[info] forasna {up.unquote(url)[-40:]}: {len(found)} job links")
+        for a in found[:3]:
+            print(f"[info]   text={txt(a)[:30]!r} title_attr={a.get('title', '')[:60]!r}")
         for a in found:
             title = txt(a)
             if len(title) < 3:
@@ -331,7 +355,6 @@ def generic(name, url_tpl, link_re, base):
 # ⚠️ generic ones are best-effort: verify the URL pattern on each site
 SOURCES = [
     linkedin, jooble, forasna, wuzzuf_b, tanqeeb_b,
-    jobzella_all,
     shaghalni_all,
 ]
 
