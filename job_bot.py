@@ -7,6 +7,20 @@ from bs4 import BeautifulSoup
 KEYWORDS = ["call center", "كول سنتر", "live chat", "لايف شات",
             "customer service", "خدمة عملاء", "customer support", "chat support",
             "chat agent", "خدمة العملاء شات", "دعم عملاء"]
+# A job title must contain at least one of these, otherwise it is ignored
+RELEVANT = ["call cent", "contact cent", "customer", "live chat", "chat", "support",
+            "help desk", "helpdesk", "telesales", "tele-sales",
+            "كول", "خدمة", "عملاء", "شات", "اتصال", "دعم"]
+# Jooble only: keep jobs located in Cairo, OR remote jobs (from anywhere)
+CAIRO = ["cairo", "القاهرة", "new cairo", "nasr city", "maadi", "heliopolis", "shorouk",
+         "obour", "sheraton", "mokattam", "rehab", "madinaty", "badr", "5th settlement",
+         "fifth settlement", "zamalek", "downtown", "abbassia", "shubra", "helwan",
+         "new nozha", "nozha", "ain shams", "manial", "capital",
+         "giza", "الجيزة", "mohandessin", "mohandiseen", "المهندسين", "dokki", "الدقي",
+         "haram", "الهرم", "agouza", "العجوزة", "faisal", "فيصل", "imbaba", "6th of october",
+         "6 october", "sixth of october", "sheikh zayed", "zayed", "smart village"]
+REMOTE = ["remote", "work from home", "work-from-home", "wfh", "home based", "home-based",
+          "from home", "virtual", "عن بعد", "ريموت", "من المنزل", "من البيت"]
 # Skip ads whose title asks for strong English (edit freely)
 EXCLUDE = ["fluent english", "excellent english", "german", "french", "c1", "c2"]
 
@@ -72,10 +86,21 @@ def jooble(kw):  # official free API: https://jooble.org/api/about
     key = os.environ.get("JOOBLE_API_KEY")
     if not key:
         return
-    r = requests.post(f"https://jooble.org/api/{key}",
-                      json={"keywords": kw, "location": "Egypt"}, timeout=25)
-    r.raise_for_status()
-    for j in r.json().get("jobs", []):
+    queries = [{"keywords": kw, "location": "Egypt"}]
+    if kw in ("call center", "live chat", "customer service", "customer support"):
+        queries.append({"keywords": kw + " remote"})  # no location: remote jobs from anywhere
+    jobs = []
+    for q in queries:
+        r = requests.post(f"https://jooble.org/api/{key}", json=q, timeout=25)
+        r.raise_for_status()
+        jobs += r.json().get("jobs", [])
+    for j in jobs:
+        loc = (j.get("location") or "").lower()
+        blob = " ".join([loc, j.get("title", ""), j.get("snippet", ""), j.get("type", "")]).lower()
+        in_cairo = any(x in loc for x in CAIRO)
+        is_remote = any(x in blob for x in REMOTE)
+        if not (in_cairo or is_remote):
+            continue  # other governorates / abroad on-site jobs
         yield dict(title=re.sub(r"<[^>]+>", "", j.get("title", "")).strip(),
                    company=j.get("company", ""), url=j["link"], source="Jooble")
 
@@ -142,6 +167,8 @@ def main():
                     low = j["title"].lower()
                     if j["url"] in seen or any(x in low for x in EXCLUDE):
                         continue
+                    if not any(x in low for x in RELEVANT):
+                        continue  # title unrelated to call center / chat / support
                     seen.add(j["url"]); new.append(j)
             except Exception as e:
                 print(f"[warn] {getattr(src, '__name__', 'src')} / {kw}: {e}")
