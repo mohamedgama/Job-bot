@@ -1,5 +1,5 @@
 """Job alert bot -> Telegram. Runs on GitHub Actions every ~5 min."""
-import json, os, re, time, urllib.parse as up
+import json, os, random, re, time, urllib.parse as up
 from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
@@ -20,7 +20,16 @@ CAIRO = ["cairo", "القاهرة", "new cairo", "nasr city", "maadi", "heliopol
          "haram", "الهرم", "agouza", "العجوزة", "faisal", "فيصل", "imbaba", "6th of october",
          "6 october", "sixth of october", "sheikh zayed", "zayed", "smart village"]
 REMOTE = ["remote", "work from home", "work-from-home", "wfh", "home based", "home-based",
-          "from home", "virtual", "عن بعد", "ريموت", "من المنزل", "من البيت"]
+          "anywhere", "worldwide", "عن بعد", "ريموت", "من المنزل", "من البيت"]
+# Text that means "fully remote" (used on the description only)
+REMOTE_STRONG = ["fully remote", "100% remote", "remote position", "remote role", "remote job",
+                 "work from home", "work-from-home", "work from anywhere", "عن بعد", "من المنزل"]
+# Remote jobs limited to one country / region -> not useful from Egypt
+RESTRICTED = ["united states", "u.s.", " usa", "us only", "us-based", "must reside", "must be located",
+              "must live", "time zone", "timezone", "pacific time", "eastern time", "central time",
+              "mountain time", "canada", "united kingdom", "uk only", "australia", "europe only",
+              "eu only", "right to work", "work authorization", "authorized to work",
+              "work authorisation", "citizen", "security clearance"]
 # Skip ads whose title asks for strong English (edit freely)
 EXCLUDE = ["fluent english", "excellent english", "german", "french", "c1", "c2"]
 
@@ -61,13 +70,31 @@ def wuzzuf(kw):
             yield dict(title=txt(h), company=txt(comp), url=h["href"].split("?")[0], source="Wuzzuf")
 
 
-def linkedin(kw):  # public guest endpoint, no login; r3600 = last hour
-    if kw not in ("call center", "live chat", "customer service"):
-        return  # fewer requests -> avoids 429
-    time.sleep(3)
+LINKEDIN_KW = ("call center", "live chat", "customer service", "customer support")
+
+
+def linkedin_get(url):
+    """LinkedIn often answers 429 (too many requests) to GitHub servers: wait and retry."""
+    for wait in (0, 20, 45):
+        time.sleep(wait)
+        try:
+            return get(url)
+        except Exception as e:
+            if "429" not in str(e):
+                raise
+    raise RuntimeError("429 even after 3 tries")
+
+
+def linkedin(kw):  # public guest endpoint, no login
+    if kw not in LINKEDIN_KW:
+        return
+    time.sleep(random.uniform(2, 5))
+    # r86400 = last 24 hours. Already-seen jobs are skipped, so a blocked run loses nothing:
+    # the job is simply picked up on the next run that gets through.
     u = ("https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?"
-         + up.urlencode({"keywords": kw, "location": "Egypt", "f_TPR": "r3600", "start": 0}))
-    for li in get(u).select("li"):
+         + up.urlencode({"keywords": kw, "location": "Egypt", "f_TPR": "r86400",
+                         "sortBy": "DD", "start": 0}))
+    for li in linkedin_get(u).select("li"):
         a = li.select_one("a.base-card__full-link")
         if a:
             yield dict(title=txt(li.select_one(".base-search-card__title")),
@@ -96,11 +123,20 @@ def jooble(kw):  # official free API: https://jooble.org/api/about
         jobs += r.json().get("jobs", [])
     for j in jobs:
         loc = (j.get("location") or "").lower()
-        blob = " ".join([loc, j.get("title", ""), j.get("snippet", ""), j.get("type", "")]).lower()
+        ttl = j.get("title", "").lower()
+        snip = j.get("snippet", "").lower()
         in_cairo = any(x in loc for x in CAIRO)
-        is_remote = any(x in blob for x in REMOTE)
-        if not (in_cairo or is_remote):
-            continue  # other governorates / abroad on-site jobs
+        loc_is_remote = any(x in loc for x in REMOTE)
+        # Remote: the LOCATION or the TITLE must say so. A description that only mentions
+        # remote work is not enough, and a real on-site place (e.g. "Oregon State") never counts.
+        remote_by_title = any(x in ttl for x in REMOTE) and (not loc or loc_is_remote)
+        remote_by_text = (not loc or loc_is_remote) and any(x in snip for x in REMOTE_STRONG)
+        is_remote = loc_is_remote or remote_by_title or remote_by_text
+        restricted = any(x in " ".join([loc, ttl, snip]) for x in RESTRICTED)
+        if in_cairo:
+            pass
+        elif not is_remote or restricted:
+            continue  # on-site abroad / other governorate / remote but limited to one country
         yield dict(title=re.sub(r"<[^>]+>", "", j.get("title", "")).strip(),
                    company=j.get("company", ""), url=j["link"],
                    source="Jooble" + (f" ({j['source']})" if j.get("source") else ""))
