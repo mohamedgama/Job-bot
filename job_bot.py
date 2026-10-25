@@ -82,7 +82,10 @@ def wuzzuf(kw):
             yield dict(title=txt(h), company=txt(comp), url=h["href"].split("?")[0], source="Wuzzuf")
 
 
-LINKEDIN_KW = ("call center", "live chat", "customer service", "customer support", "copywriter")
+def _ascii_kw():
+    """English keywords (max 6) for sites that are strict about request volume."""
+    return [k for k in KEYWORDS if k.isascii()][:6]
+
 
 
 def linkedin_get(url):
@@ -98,7 +101,7 @@ def linkedin_get(url):
 
 
 def linkedin(kw):  # public guest endpoint, no login
-    if kw not in LINKEDIN_KW:
+    if kw not in _ascii_kw():
         return
     time.sleep(random.uniform(2, 5))
     # r86400 = last 24 hours. Already-seen jobs are skipped, so a blocked run loses nothing:
@@ -123,10 +126,10 @@ def bayt(kw):
 
 def jooble(kw):  # official free API: https://jooble.org/api/about
     key = os.environ.get("JOOBLE_API_KEY")
-    if not key:
+    if not key or kw not in KEYWORDS[:12]:
         return
     queries = [{"keywords": kw, "location": "Egypt"}]
-    if kw in ("call center", "live chat", "customer service", "customer support", "copywriter"):
+    if kw in _ascii_kw():
         queries.append({"keywords": kw + " remote"})  # no location: remote jobs from anywhere
     jobs = []
     for q in queries:
@@ -193,7 +196,7 @@ def _anchors(pg):
 def shaghalni_all(keywords):
     """Shaghalni loads jobs from its own JSON API; we open the page in a browser and read that answer."""
     from playwright.sync_api import sync_playwright
-    kws = [k for k in keywords if k in ("كول سنتر", "خدمة عملاء", "لايف شات", "دعم عملاء", "كوبي رايتر", "كاتب محتوى")]
+    kws = [k for k in keywords if not k.isascii()][:8]  # Arabic keywords only
     got = []
 
     def on_resp(r):
@@ -386,9 +389,42 @@ def generic(name, url_tpl, link_re, base):
 
 # ⚠️ generic ones are best-effort: verify the URL pattern on each site
 SOURCES = [
-    linkedin, jooble, forasna, wuzzuf_b, tanqeeb_b,
+    linkedin, jooble, forasna,
     shaghalni_all,
 ]
+
+
+START = time.time()
+TIME_BUDGET = 420      # seconds: stop starting new searches after 7 minutes
+MAX_SEND = 30          # max messages per run (Telegram rate limits); the rest go next run
+MAX_SEEN = 8000
+
+
+def tg_send(text):
+    """True only if Telegram really accepted the message. Waits when Telegram says 'slow down'."""
+    if not (TOKEN and CHAT):
+        print(text, "\n")
+        return True
+    for _ in range(4):
+        try:
+            r = requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                              data={"chat_id": CHAT, "text": text[:4000]}, timeout=20)
+        except Exception as e:
+            print("[warn] telegram send:", str(e)[:60])
+            time.sleep(3)
+            continue
+        if r.status_code == 200:
+            return True
+        if r.status_code == 429:
+            try:
+                wait = r.json().get("parameters", {}).get("retry_after", 5)
+            except Exception:
+                wait = 5
+            time.sleep(min(wait + 1, 60))
+            continue
+        print("[warn] telegram", r.status_code, r.text[:80])
+        return False
+    return False
 
 
 def notify(j):
@@ -396,36 +432,178 @@ def notify(j):
     if j.get("note"):
         msg += f"\n{j['note']}"
     msg += f"\n🔗 {j['url']}"
-    if not TOKEN:
-        print(msg, "\n"); return
-    requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-                  data={"chat_id": CHAT, "text": msg}, timeout=20)
+    return tg_send(msg)
+
+
+def send(text):
+    tg_send(text)
+
+
+def is_relevant(low):
+    for e in RELEVANT:
+        words = e.split()
+        if words and all(w in low for w in words):  # "data entry" also matches "Entry Data Clerk"
+            return True
+    return False
+
+
+def is_excluded(low):
+    for x in EXCLUDE:
+        if not x:
+            continue
+        if x.isascii():  # whole word only, so "c1" does not hit "ABC123"
+            if re.search(r"(?<![a-z0-9])" + re.escape(x) + r"(?![a-z0-9])", low):
+                return True
+        elif x in low:
+            return True
+    return False
+
+
+def same_job_key(j):
+    if j.get("company"):  # same job posted on two sites
+        return "k|" + re.sub(r"\s+", " ", j["title"].lower()).strip() + "|" + j["company"].lower().strip()
+    return None
+
+
+HELP = ("أوامر التحكم (ابعتها للبوت هنا):\n"
+        "/add كلمة ← يدور على كلمة جديدة (مثال: /add محاسب)\n"
+        "/remove كلمة ← يشيل كلمة\n"
+        "/exclude كلمة ← يستبعد أي وظيفة عنوانها فيه الكلمة دي\n"
+        "/unexclude كلمة ← يرجع الكلمة المستبعدة\n"
+        "/list ← يعرض الإعدادات الحالية\n"
+        "التغيير بيتطبق في الدورة الجاية (خلال دقايق).")
+
+
+def apply_command(st, text):
+    cmd, _, arg = text.partition(" ")
+    cmd, arg = cmd.lower().split("@")[0], arg.strip()
+    low = arg.lower()
+    if cmd in ("/start", "/help"):
+        return HELP
+    if cmd == "/list":
+        return ("🔎 كلمات البحث:\n" + "\n".join("• " + k for k in st["keywords"])
+                + "\n\n🚫 المستبعد من العناوين:\n"
+                + ("\n".join("• " + k for k in st["exclude"]) or "(مفيش)"))
+    if cmd in ("/add", "/remove", "/exclude", "/unexclude") and not arg:
+        return "اكتب الكلمة بعد الأمر، مثال: " + cmd + " محاسب"
+    if cmd == "/add" and len(arg) < 3:
+        return "الكلمة قصيرة جداً (3 حروف على الأقل) عشان متجيبش وظايف غلط."
+    if cmd == "/exclude" and len(arg) < 2:
+        return "الكلمة قصيرة جداً."
+    if cmd == "/add" and len(arg) > 40:
+        return "الكلمة طويلة، اكتب كلمة أو كلمتين."
+    if cmd == "/add":
+        if low not in [k.lower() for k in st["keywords"]]:
+            st["keywords"].append(arg)
+        if low not in st["relevant"]:
+            st["relevant"].append(low)
+        return f"✅ ضفت «{arg}». هتشوف نتايجها في الدورة الجاية (قد تيجي وظايف كتير مرة واحدة)."
+    if cmd == "/remove":
+        st["keywords"] = [k for k in st["keywords"] if k.lower() != low]
+        st["relevant"] = [k for k in st["relevant"] if k != low]
+        return f"🗑 شيلت «{arg}»."
+    if cmd == "/exclude":
+        if low not in st["exclude"]:
+            st["exclude"].append(low)
+        return f"🚫 هستبعد أي وظيفة عنوانها فيه «{arg}»."
+    if cmd == "/unexclude":
+        st["exclude"] = [k for k in st["exclude"] if k != low]
+        return f"↩️ رجّعت «{arg}»."
+    return None  # not a command we know: ignore
+
+
+def handle_commands(state):
+    """Read messages you sent to the bot and apply them (only from YOUR chat)."""
+    if not (TOKEN and CHAT):
+        return
+    try:
+        r = requests.get(f"https://api.telegram.org/bot{TOKEN}/getUpdates",
+                         params={"offset": state.get("tg_offset", 0)}, timeout=20).json()
+    except Exception as e:
+        print("[warn] telegram commands:", e)
+        return
+    for u in r.get("result", []):
+        state["tg_offset"] = u["update_id"] + 1
+        m = u.get("message") or {}
+        if str(m.get("chat", {}).get("id")) != str(CHAT):
+            continue  # ignore anyone else
+        text = (m.get("text") or "").strip()
+        if text.startswith("/"):
+            reply = apply_command(state["settings"], text)
+            if reply:
+                print("[info] command:", text[:40])
+                send(reply)
 
 
 def main():
+    global KEYWORDS, RELEVANT, EXCLUDE
     first_run = not SEEN_FILE.exists()
-    seen = set(json.loads(SEEN_FILE.read_text())) if not first_run else set()
-    new = []
+    state = {}
+    if not first_run:
+        try:
+            raw = json.loads(SEEN_FILE.read_text())
+        except Exception:
+            raw = []
+        state = raw if isinstance(raw, dict) else {"seen": raw}  # old file = plain list
+    seen_list = list(state.get("seen", []))  # keeps order, oldest first
+    seen = set(seen_list)
+    st = state.setdefault("settings", {})
+    st.setdefault("keywords", list(KEYWORDS))
+    st.setdefault("relevant", list(RELEVANT))
+    st.setdefault("exclude", list(EXCLUDE))
+    handle_commands(state)
+    KEYWORDS, RELEVANT, EXCLUDE = st["keywords"], st["relevant"], st["exclude"]
+
+    cands, batch = [], set()
     for src in SOURCES:
+        if time.time() - START > TIME_BUDGET:
+            print("[warn] time budget reached, skipping", getattr(src, "__name__", "src"))
+            continue
         runs = [KEYWORDS] if getattr(src, "all_kw", False) else KEYWORDS
         for kw in runs:
+            if time.time() - START > TIME_BUDGET:
+                break
             try:
                 for j in src(kw):
                     low = j["title"].lower()
-                    if j["url"] in seen or any(x in low for x in EXCLUDE):
+                    key2 = same_job_key(j)
+                    if (j["url"] in seen or j["url"] in batch
+                            or (key2 and (key2 in seen or key2 in batch))):
                         continue
-                    if not j.get("trusted") and not any(x in low for x in RELEVANT):
-                        continue  # title unrelated to call center / chat / support
-                    seen.add(j["url"]); new.append(j)
+                    if is_excluded(low):
+                        continue
+                    if not j.get("trusted") and not is_relevant(low):
+                        continue  # title unrelated to your keywords
+                    batch.add(j["url"])
+                    if key2:
+                        batch.add(key2)
+                    cands.append(j)
             except Exception as e:
-                print(f"[warn] {getattr(src, '__name__', 'src')} / {kw}: {e}")
-    if not first_run:  # first run only builds the baseline, no spam
-        for j in new:
-            notify(j)
+                print(f"[warn] {getattr(src, '__name__', 'src')} / {str(kw)[:30]}: {e}")
+                if "403" in str(e):
+                    break  # the site blocks us: do not waste time on its other keywords
+
+    done = []
+    if first_run:  # first run only builds the baseline, no spam
+        done = cands
+    else:
+        for j in cands[:MAX_SEND]:
+            if notify(j):
+                done.append(j)
+                time.sleep(1.1)
+            else:
+                break  # Telegram problem: keep the rest for the next run (nothing is lost)
+    for j in done:  # only jobs that were really delivered count as "seen"
+        seen_list.append(j["url"])
+        k = same_job_key(j)
+        if k:
+            seen_list.append(k)
     from collections import Counter
-    per = Counter(j["source"].split(" ")[0] for j in new)
-    print(f"{len(new)} new ({'baseline' if first_run else 'sent'}) by source: {dict(per)}")
-    SEEN_FILE.write_text(json.dumps(sorted(seen)[-5000:], ensure_ascii=False))
+    per = Counter(j["source"].split(" ")[0] for j in done)
+    left = len(cands) - len(done)
+    print(f"{len(done)} {'baseline' if first_run else 'sent'}, {left} waiting for next run, by source: {dict(per)}")
+    state["seen"] = seen_list[-MAX_SEEN:]
+    SEEN_FILE.write_text(json.dumps(state, ensure_ascii=False))
 
 
 if __name__ == "__main__":
