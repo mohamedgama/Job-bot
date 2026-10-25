@@ -6,11 +6,13 @@ from bs4 import BeautifulSoup
 
 KEYWORDS = ["call center", "كول سنتر", "live chat", "لايف شات",
             "customer service", "خدمة عملاء", "customer support", "chat support",
-            "chat agent", "خدمة العملاء شات", "دعم عملاء"]
+            "chat agent", "خدمة العملاء شات", "دعم عملاء",
+            "copywriter", "content writer", "كوبي رايتر", "كاتب محتوى"]
 # A job title must contain at least one of these, otherwise it is ignored
 RELEVANT = ["call cent", "contact cent", "customer", "live chat", "chat", "support",
             "help desk", "helpdesk", "telesales", "tele-sales",
-            "كول", "خدمة", "عملاء", "شات", "اتصال", "دعم"]
+            "كول", "خدمة", "عملاء", "شات", "اتصال", "دعم",
+            "copywriter", "copy writer", "content writer", "كوبي", "كاتب محتوى", "كتابة محتوى"]
 # Jooble only: keep jobs located in Cairo, OR remote jobs (from anywhere)
 CAIRO = ["cairo", "القاهرة", "new cairo", "nasr city", "maadi", "heliopolis", "shorouk",
          "obour", "sheraton", "mokattam", "rehab", "madinaty", "badr", "5th settlement",
@@ -80,7 +82,7 @@ def wuzzuf(kw):
             yield dict(title=txt(h), company=txt(comp), url=h["href"].split("?")[0], source="Wuzzuf")
 
 
-LINKEDIN_KW = ("call center", "live chat", "customer service", "customer support")
+LINKEDIN_KW = ("call center", "live chat", "customer service", "customer support", "copywriter")
 
 
 def linkedin_get(url):
@@ -124,7 +126,7 @@ def jooble(kw):  # official free API: https://jooble.org/api/about
     if not key:
         return
     queries = [{"keywords": kw, "location": "Egypt"}]
-    if kw in ("call center", "live chat", "customer service", "customer support"):
+    if kw in ("call center", "live chat", "customer service", "customer support", "copywriter"):
         queries.append({"keywords": kw + " remote"})  # no location: remote jobs from anywhere
     jobs = []
     for q in queries:
@@ -191,7 +193,7 @@ def _anchors(pg):
 def shaghalni_all(keywords):
     """Shaghalni loads jobs from its own JSON API; we open the page in a browser and read that answer."""
     from playwright.sync_api import sync_playwright
-    kws = [k for k in keywords if k in ("كول سنتر", "خدمة عملاء", "لايف شات", "دعم عملاء")]
+    kws = [k for k in keywords if k in ("كول سنتر", "خدمة عملاء", "لايف شات", "دعم عملاء", "كوبي رايتر", "كاتب محتوى")]
     got = []
 
     def on_resp(r):
@@ -341,12 +343,19 @@ FORASNA_PAGES = [
     (_fa("وظائف-خدمة-عملاء-في-مصر"), True),
     (_fa("وظائف-دعم-فنى-في-مصر"), True),
     (_fa("وظائف-عمل-من-المنزل"), False),  # remote: any place, but the title must match
+    # copywriting pages (address guessed from the site's pattern; skipped with a warning if missing)
+    (_fa("وظائف-كوبي-رايتر-في-القاهرة"), True),
+    (_fa("وظائف-كوبي-رايتر-في-مصر"), True),
 ]
 
 
 def forasna(_keywords):
     for url, trusted in FORASNA_PAGES:
-        found = get(url).select("a[href*='/job/p/']")
+        try:
+            found = get(url).select("a[href*='/job/p/']")
+        except Exception as e:
+            print(f"[warn] forasna page {up.unquote(url)[-30:]}: {e}")
+            continue
         kept = 0
         for a in found:
             title = txt(a)
