@@ -41,7 +41,8 @@ RESTRICTED = ["united states", "u.s.", " usa", "us only", "us-based", "must resi
               "must live", "time zone", "timezone", "pacific time", "eastern time", "central time",
               "mountain time", "canada", "united kingdom", "uk only", "australia", "europe only",
               "eu only", "right to work", "work authorization", "authorized to work",
-              "work authorisation", "citizen", "security clearance"]
+              "work authorisation", "citizen", "security clearance",
+              "local presence", "must be local", "hybrid", "on-site", "onsite", "on site", "in-office"]
 # Skip ads whose title asks for strong English (edit freely)
 EXCLUDE = ["fluent english", "excellent english", "german", "french", "c1", "c2"]
 
@@ -163,8 +164,8 @@ def jooble(kw):  # official free API: https://jooble.org/api/about
         elif restricted or not is_remote:
             continue  # on-site abroad / other governorate / remote limited to one country
         elif not global_ok:
-            # Remote, but the ad does not say people from Egypt can apply: send it with a warning
-            note = "⚠️ ريموت، بس مش مكتوب إنه مفتوح لمصر. اتأكد من الشروط قبل ما تقدم"
+            continue  # "Remote" without any sign that Egypt/worldwide is allowed: Jooble shows these
+                      # as "requires local presence", so they are not real remote jobs for you
         kept += 1
         yield dict(note=note, title=re.sub(r"<[^>]+>", "", j.get("title", "")).strip(),
                    company=j.get("company", ""), url=j["link"],
