@@ -84,8 +84,8 @@ def wuzzuf(kw):
 
 
 def _ascii_kw():
-    """English keywords (max 6) for sites that are strict about request volume."""
-    return [k for k in KEYWORDS if k.isascii()][:6]
+    """English keywords (max 12) for sites that are strict about request volume."""
+    return [k for k in KEYWORDS if k.isascii()][:12]
 
 
 
@@ -127,7 +127,7 @@ def bayt(kw):
 
 def jooble(kw):  # official free API: https://jooble.org/api/about
     key = os.environ.get("JOOBLE_API_KEY")
-    if not key or kw not in KEYWORDS[:12]:
+    if not key or kw not in KEYWORDS[:24]:
         return
     queries = [{"keywords": kw, "location": "Egypt"}]
     if kw in _ascii_kw():
@@ -197,7 +197,8 @@ def _anchors(pg):
 def shaghalni_all(keywords):
     """Shaghalni loads jobs from its own JSON API; we open the page in a browser and read that answer."""
     from playwright.sync_api import sync_playwright
-    kws = [k for k in keywords if not k.isascii()][:8]  # Arabic keywords only
+    # Arabic keywords (max 8) + the newest English ones (max 6)
+    kws = [k for k in keywords if not k.isascii()][:8] + [k for k in keywords if k.isascii()][:6]
     got = []
 
     def on_resp(r):
@@ -353,12 +354,24 @@ FORASNA_PAGES = [
 ]
 
 
-def forasna(_keywords):
-    for url, trusted in FORASNA_PAGES:
+def forasna(keywords):
+    pages = list(FORASNA_PAGES)
+    have = {u for u, _ in pages}
+    for kw in [k for k in keywords if not k.isascii()][:10]:
+        # Forasna has no search box we can use, but it has a page per job title: /a/وظائف-<كلمة>-في-مصر
+        url = _fa("وظائف-" + re.sub(r"\s+", "-", kw.strip()) + "-في-مصر")
+        if url not in have:
+            have.add(url)
+            pages.append((url, True))
+    for url, trusted in pages:
         try:
             found = get(url).select("a[href*='/job/p/']")
         except Exception as e:
-            print(f"[warn] forasna page {up.unquote(url)[-30:]}: {e}")
+            msg = str(e)
+            if "404" in msg:
+                print(f"[info] forasna no page for {up.unquote(url)[-34:]}")
+            else:
+                print(f"[warn] forasna page {up.unquote(url)[-30:]}: {msg[:60]}")
             continue
         kept = 0
         for a in found:
@@ -395,7 +408,24 @@ SOURCES = [
 ]
 
 
+# Keywords added from this file. Each batch is applied ONCE (the saved settings win after that),
+# so /remove from Telegram keeps working. To add more later, add a new batch with a new name.
+PRESET_BATCHES = {
+    "medical-1": ["medical claims", "medical approval", "medical scribe",
+                  "medical call center", "home care", "medical case management"],
+    # Arabic versions (my guesses of how Egyptian ads write them). Remove any with /remove
+    "medical-ar": ["مطالبات طبية", "موافقات طبية", "رعاية منزلية", "تمريض منزلي",
+                   "ادارة حالات طبية", "كول سنتر طبي"],
+}
+
 START = time.time()
+DEFAULTS_VERSION = 2
+NEW_DEFAULTS = {  # added in version 2
+    "keywords": ["medical claims specialist", "medical approval specialist", "medical scribe",
+                 "medical account call center", "home care specialist", "medical case management"],
+    "relevant": ["medical claims", "medical approval", "medical scribe", "medical account",
+                 "home care", "medical case", "case management"],
+}
 TIME_BUDGET = 420      # seconds: stop starting new searches after 7 minutes
 MAX_SEND = 30          # max messages per run (Telegram rate limits); the rest go next run
 MAX_SEEN = 8000
@@ -487,29 +517,38 @@ def apply_command(st, text):
                 + ("\n".join("• " + k for k in st["exclude"]) or "(مفيش)"))
     if cmd in ("/add", "/remove", "/exclude", "/unexclude") and not arg:
         return "اكتب الكلمة بعد الأمر، مثال: " + cmd + " محاسب"
-    if cmd == "/add" and len(arg) < 3:
-        return "الكلمة قصيرة جداً (3 حروف على الأقل) عشان متجيبش وظايف غلط."
-    if cmd == "/exclude" and len(arg) < 2:
-        return "الكلمة قصيرة جداً."
-    if cmd == "/add" and len(arg) > 40:
-        return "الكلمة طويلة، اكتب كلمة أو كلمتين."
+    items = [x.strip() for x in re.split(r"[,\n\u060c]", arg) if x.strip()]
     if cmd == "/add":
-        if low not in [k.lower() for k in st["keywords"]]:
-            st["keywords"].append(arg)
-        if low not in st["relevant"]:
-            st["relevant"].append(low)
-        return f"✅ ضفت «{arg}». هتشوف نتايجها في الدورة الجاية (قد تيجي وظايف كتير مرة واحدة)."
+        added, bad = [], []
+        for it in items:
+            if len(it) < 3 or len(it) > 40:
+                bad.append(it)
+                continue
+            if it.lower() not in [k.lower() for k in st["keywords"]]:
+                st["keywords"].insert(0, it)  # newest first, so it is always searched
+            if it.lower() not in st["relevant"]:
+                st["relevant"].append(it.lower())
+            added.append(it)
+        msg = ("✅ ضفت: " + "، ".join(added)
+               + "\nهتشوف نتايجها في الدورة الجاية (ممكن وظايف كتير مرة واحدة).") if added else ""
+        if bad:
+            msg += "\n⚠️ اتجاهلت (لازم من 3 لـ 40 حرف): " + "، ".join(bad)
+        return msg.strip()
     if cmd == "/remove":
-        st["keywords"] = [k for k in st["keywords"] if k.lower() != low]
-        st["relevant"] = [k for k in st["relevant"] if k != low]
-        return f"🗑 شيلت «{arg}»."
+        lows = [x.lower() for x in items]
+        st["keywords"] = [k for k in st["keywords"] if k.lower() not in lows]
+        st["relevant"] = [k for k in st["relevant"] if k not in lows]
+        return "🗑 شيلت: " + "، ".join(items)
     if cmd == "/exclude":
-        if low not in st["exclude"]:
-            st["exclude"].append(low)
-        return f"🚫 هستبعد أي وظيفة عنوانها فيه «{arg}»."
+        ok = [x.lower() for x in items if len(x) >= 2]
+        for x in ok:
+            if x not in st["exclude"]:
+                st["exclude"].append(x)
+        return ("🚫 هستبعد أي وظيفة عنوانها فيه: " + "، ".join(ok)) if ok else "الكلمة قصيرة جداً."
     if cmd == "/unexclude":
-        st["exclude"] = [k for k in st["exclude"] if k != low]
-        return f"↩️ رجّعت «{arg}»."
+        lows = [x.lower() for x in items]
+        st["exclude"] = [k for k in st["exclude"] if k not in lows]
+        return "↩️ رجّعت: " + "، ".join(items)
     return None  # not a command we know: ignore
 
 
@@ -552,6 +591,24 @@ def main():
     st.setdefault("keywords", list(KEYWORDS))
     st.setdefault("relevant", list(RELEVANT))
     st.setdefault("exclude", list(EXCLUDE))
+    if st.get("defaults_version", 1) < DEFAULTS_VERSION:  # merge new built-in keywords once
+        for k in reversed(NEW_DEFAULTS["keywords"]):
+            if k.lower() not in [x.lower() for x in st["keywords"]]:
+                st["keywords"].insert(0, k)
+        for k in NEW_DEFAULTS["relevant"]:
+            if k not in st["relevant"]:
+                st["relevant"].append(k)
+        st["defaults_version"] = DEFAULTS_VERSION
+    done_batches = state.setdefault("batches", [])
+    for name, kws in PRESET_BATCHES.items():
+        if name in done_batches:
+            continue
+        for kw in reversed(kws):  # newest first, keeps the order written above
+            if kw.lower() not in [k.lower() for k in st["keywords"]]:
+                st["keywords"].insert(0, kw)
+            if kw.lower() not in st["relevant"]:
+                st["relevant"].append(kw.lower())
+        done_batches.append(name)
     handle_commands(state)
     KEYWORDS, RELEVANT, EXCLUDE = st["keywords"], st["relevant"], st["exclude"]
 
